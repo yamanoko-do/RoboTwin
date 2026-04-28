@@ -65,13 +65,32 @@ def main(usr_args):
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     task_name = usr_args["task_name"]
     task_config = usr_args["task_config"]
-    ckpt_setting = usr_args["ckpt_setting"]
+    ckpt_setting = usr_args.get("ckpt_setting", "")
     # checkpoint_num = usr_args['checkpoint_num']
     policy_name = usr_args["policy_name"]
     instruction_type = usr_args["instruction_type"]
     save_dir = None
     video_save_dir = None
     video_size = None
+
+    # Build a descriptive folder name from ckpt_path
+    ckpt_path = usr_args.get("ckpt_path", "")
+    if ckpt_path:
+        # e.g. .../2026.04.27/23.36.15_beat_block_hammer_hhh/checkpoints/beat_block_hammer-demo_clean-50-0/600.ckpt
+        #   -> 2026.04.27-23.36.15_beat_block_hammer_hhh_ckpt600
+        parts = Path(ckpt_path).parts
+        run_name = None
+        for i, p in enumerate(parts):
+            if p == "outputs" and i + 2 < len(parts):
+                date_part = parts[i + 1]       # 2026.04.27
+                run_part = parts[i + 2]         # 23.36.15_beat_block_hammer_hhh
+                run_name = f"{date_part}-{run_part}"
+                break
+        ckpt_stem = Path(ckpt_path).stem       # 600
+        if run_name:
+            ckpt_setting = f"{run_name}_ckpt{ckpt_stem}"
+        else:
+            ckpt_setting = f"ckpt{ckpt_stem}"
 
     get_model = eval_function_decorator(policy_name, "get_model")
 
@@ -121,7 +140,7 @@ def main(usr_args):
     else:
         embodiment_name = str(embodiment_type[0]) + "+" + str(embodiment_type[1])
 
-    save_dir = Path(f"eval_result/{task_name}/{policy_name}/{task_config}/{ckpt_setting}/{current_time}")
+    save_dir = Path(f"policy/DP/data/eval_result/{task_name}/{policy_name}/{task_config}/{ckpt_setting}/{current_time}")
     save_dir.mkdir(parents=True, exist_ok=True)
 
     if args["eval_video_log"]:

@@ -15,7 +15,8 @@ import pathlib
 from torch.utils.data import DataLoader
 import copy
 
-import tqdm, random
+import tqdm, random, time
+import swanlab as wandb
 import numpy as np
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
 from diffusion_policy.policy.diffusion_unet_image_policy import DiffusionUnetImagePolicy
@@ -108,16 +109,17 @@ class RobotWorkspace(BaseWorkspace):
         env_runner = None
 
         # configure logging
-        # wandb_run = wandb.init(
-        #     dir=str(self.output_dir),
-        #     config=OmegaConf.to_container(cfg, resolve=True),
-        #     **cfg.logging
-        # )
-        # wandb.config.update(
-        #     {
-        #         "output_dir": self.output_dir,
-        #     }
-        # )
+        wandb_run = wandb.init(
+            workspace="limxooo",
+            logdir=str(self.output_dir),
+            config=OmegaConf.to_container(cfg, resolve=True),
+            **cfg.logging
+        )
+        wandb.config.update(
+            {
+                "output_dir": self.output_dir,
+            }
+        )
 
         # configure checkpoint
         topk_manager = TopKCheckpointManager(save_dir=os.path.join(self.output_dir, "checkpoints"),
@@ -139,6 +141,7 @@ class RobotWorkspace(BaseWorkspace):
             cfg.training.max_val_steps = 3
             cfg.training.rollout_every = 1
             cfg.training.checkpoint_every = 1
+            cfg.training.eval_every = 1
             cfg.training.val_every = 1
             cfg.training.sample_every = 1
 
@@ -146,6 +149,7 @@ class RobotWorkspace(BaseWorkspace):
         log_path = os.path.join(self.output_dir, "logs.json.txt")
 
         with JsonLogger(log_path) as json_logger:
+            training_start_time = time.time()
             for local_epoch_idx in range(cfg.training.num_epochs):
                 step_log = dict()
                 # ========= train for this epoch ==========
@@ -154,6 +158,9 @@ class RobotWorkspace(BaseWorkspace):
                     self.model.obs_encoder.requires_grad_(False)
 
                 train_losses = list()
+                total_epochs = cfg.training.num_epochs
+                iters_per_epoch = len(train_dataloader)
+                total_iters = total_epochs * iters_per_epoch
                 with tqdm.tqdm(
                         train_dataloader,
                         desc=f"Training epoch {self.epoch}",
@@ -181,14 +188,29 @@ class RobotWorkspace(BaseWorkspace):
 
                         # logging
                         raw_loss_cpu = raw_loss.item()
-                        tepoch.set_postfix(loss=raw_loss_cpu, refresh=False)
+                        # ETA estimation
+                        done_iters = self.epoch * iters_per_epoch + batch_idx + 1
+                        remaining_iters = total_iters - done_iters
+                        training_elapsed = time.time() - training_start_time
+                        avg_iter_sec = training_elapsed / done_iters
+                        remaining_sec = avg_iter_sec * remaining_iters
+                        time_cost = tqdm.tqdm.format_interval(training_elapsed)
+                        time_left = tqdm.tqdm.format_interval(remaining_sec)
+                        tepoch.set_postfix(
+                            loss=raw_loss_cpu,
+                            time_cost=time_cost,
+                            ETA=time_left,
+                            refresh=False,
+                        )
                         train_losses.append(raw_loss_cpu)
                         step_log = {
-                            "train_loss": raw_loss_cpu,
-                            "global_step": self.global_step,
-                            "epoch": self.epoch,
-                            "lr": lr_scheduler.get_last_lr()[0],
+                            "train/loss": raw_loss_cpu,
+                            "train/lr": lr_scheduler.get_last_lr()[0],
                         }
+
+                        # per-iteration logging
+                        if self.global_step % cfg.training.log_every == 0:
+                            wandb.log(step_log, step=self.global_step)
 
                         is_last_batch = batch_idx == (len(train_dataloader) - 1)
                         if not is_last_batch:
@@ -203,7 +225,7 @@ class RobotWorkspace(BaseWorkspace):
                 # at the end of each epoch
                 # replace train_loss with epoch average
                 train_loss = np.mean(train_losses)
-                step_log["train_loss"] = train_loss
+                step_log["train/loss"] = train_loss
 
                 # ========= eval for this epoch ==========
                 policy = self.model
@@ -216,6 +238,36 @@ class RobotWorkspace(BaseWorkspace):
                 #     runner_log = env_runner.run(policy)
                 #     # log all
                 #     step_log.update(runner_log)
+
+                # run in-training evaluation
+                if ((self.epoch + 1) % cfg.training.eval_every) == 0 and cfg.eval_task_name is not None:
+                    from diffusion_policy.evaluation.in_training_evaluator import run_eval_episodes
+                    success_rate, num_success, num_total, video_path = run_eval_episodes(
+                        policy=policy,
+                        n_obs_steps=cfg.n_obs_steps,
+                        n_action_steps=cfg.n_action_steps,
+                        task_name=cfg.eval_task_name,
+                        task_config=cfg.eval_task_config,
+                        seed=cfg.training.seed,
+                        head_camera_type=cfg.head_camera_type,
+                        num_episodes=cfg.training.eval_episodes,
+                        instruction_type=cfg.instruction_type,
+                    )
+                    wandb.log({
+                        "eval/success_rate": success_rate,
+                        "eval/success_count": num_success,
+                        "eval/total_episodes": num_total,
+                    }, step=self.epoch)
+                    print(f"\033[96m[Eval] Epoch {self.epoch}: {num_success}/{num_total} = {success_rate:.1%}\033[0m")
+
+                    # Upload video to SwanLab (convert mp4 to gif since swanlab.Video only supports GIF)
+                    if video_path is not None and os.path.exists(video_path):
+                        gif_path = video_path.replace(".mp4", ".gif")
+                        os.system(f"ffmpeg -y -loglevel error -i {video_path} -r 10 {gif_path}")
+                        if os.path.exists(gif_path):
+                            import swanlab
+                            wandb.log({"eval/video": swanlab.Video(gif_path, caption=f"epoch{self.epoch}")}, step=self.epoch)
+                            os.remove(gif_path)
 
                 # run validation
                 if (self.epoch % cfg.training.val_every) == 0:
@@ -237,7 +289,7 @@ class RobotWorkspace(BaseWorkspace):
                         if len(val_losses) > 0:
                             val_loss = torch.mean(torch.tensor(val_losses)).item()
                             # log epoch average validation loss
-                            step_log["val_loss"] = val_loss
+                            step_log["val/loss"] = val_loss
 
                 # run diffusion sampling on a training batch
                 if (self.epoch % cfg.training.sample_every) == 0:
@@ -250,7 +302,7 @@ class RobotWorkspace(BaseWorkspace):
                         result = policy.predict_action(obs_dict)
                         pred_action = result["action_pred"]
                         mse = torch.nn.functional.mse_loss(pred_action, gt_action)
-                        step_log["train_action_mse_error"] = mse.item()
+                        step_log["train/action_mse_error"] = mse.item()
                         del batch
                         del obs_dict
                         del gt_action
@@ -262,7 +314,7 @@ class RobotWorkspace(BaseWorkspace):
                 if ((self.epoch + 1) % cfg.training.checkpoint_every) == 0:
                     # checkpointing
                     save_name = pathlib.Path(self.cfg.task.dataset.zarr_path).stem
-                    self.save_checkpoint(f"checkpoints/{save_name}-{seed}/{self.epoch + 1}.ckpt")  # TODO
+                    self.save_checkpoint(path=pathlib.Path(self.output_dir).joinpath("checkpoints", f"{save_name}-{seed}", f"{self.epoch + 1}.ckpt"))  # TODO
 
                 # ========= eval end for this epoch ==========
                 policy.train()
@@ -270,6 +322,8 @@ class RobotWorkspace(BaseWorkspace):
                 # end of epoch
                 # log of last step is combined with validation and rollout
                 json_logger.log(step_log)
+                if self.global_step % cfg.training.log_every != 0:
+                    wandb.log(step_log, step=self.global_step)
                 self.global_step += 1
                 self.epoch += 1
 

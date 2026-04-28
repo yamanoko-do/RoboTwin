@@ -7,6 +7,7 @@ import json
 import os, re
 
 from .actor_utils import Actor, ArticulationActor
+from envs._GLOBAL_CONFIGS import ASSETS_PATH
 
 
 class UnStableError(Exception):
@@ -402,7 +403,7 @@ def create_obj(
 ) -> Actor:
     scene, pose = preprocess(scene, pose)
 
-    modeldir = Path("assets/objects") / modelname
+    modeldir = Path(ASSETS_PATH) / "objects" / modelname
     if model_id is None:
         file_name = modeldir / "textured.obj"
         json_file_path = modeldir / "model_data.json"
@@ -448,7 +449,7 @@ def create_glb(
 ) -> Actor:
     scene, pose = preprocess(scene, pose)
 
-    modeldir = Path("./assets/objects") / modelname
+    modeldir = Path(ASSETS_PATH) / "objects" / modelname
     if model_id is None:
         file_name = modeldir / "base.glb"
         json_file_path = modeldir / "model_data.json"
@@ -508,7 +509,7 @@ def create_actor(
         model_id=0,
 ) -> Actor:
     scene, pose = preprocess(scene, pose)
-    modeldir = Path("assets/objects") / modelname
+    modeldir = Path(ASSETS_PATH) / "objects" / modelname
 
     if model_id is None:
         json_file_path = modeldir / "model_data.json"
@@ -563,7 +564,7 @@ def create_actor(
 def create_urdf_obj(scene, pose: sapien.Pose, modelname: str, scale=1.0, fix_root_link=True) -> ArticulationActor:
     scene, pose = preprocess(scene, pose)
 
-    modeldir = Path("./assets/objects") / modelname
+    modeldir = Path(ASSETS_PATH) / "objects" / modelname
     json_file_path = modeldir / "model_data.json"
     loader: sapien.URDFLoader = scene.create_urdf_loader()
     loader.scale = scale

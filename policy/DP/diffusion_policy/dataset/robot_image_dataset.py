@@ -33,8 +33,9 @@ class RobotImageDataset(BaseImageDataset):
         super().__init__()
         self.replay_buffer = ReplayBuffer.copy_from_path(
             zarr_path,
-            # keys=['head_camera', 'front_camera', 'left_camera', 'right_camera', 'state', 'action'],
-            keys=["head_camera", "state", "action"],
+            keys=["head_camera", "left_camera", "right_camera",
+                  "head_camera_depth", "left_camera_depth", "right_camera_depth",
+                  "state", "action"],
         )
 
         val_mask = get_val_mask(n_episodes=self.replay_buffer.n_episodes, val_ratio=val_ratio, seed=seed)
@@ -83,30 +84,36 @@ class RobotImageDataset(BaseImageDataset):
         normalizer = LinearNormalizer()
         normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
         normalizer["head_cam"] = get_image_range_normalizer()
-        normalizer["front_cam"] = get_image_range_normalizer()
         normalizer["left_cam"] = get_image_range_normalizer()
         normalizer["right_cam"] = get_image_range_normalizer()
+        normalizer["head_depth"] = get_image_range_normalizer()
+        normalizer["left_depth"] = get_image_range_normalizer()
+        normalizer["right_depth"] = get_image_range_normalizer()
         return normalizer
 
     def __len__(self) -> int:
         return len(self.sampler)
 
     def _sample_to_data(self, sample):
-        agent_pos = sample["state"].astype(np.float32)  # (agent_posx2, block_posex3)
+        agent_pos = sample["state"].astype(np.float32)
         head_cam = np.moveaxis(sample["head_camera"], -1, 1) / 255
-        # front_cam = np.moveaxis(sample['front_camera'],-1,1)/255
-        # left_cam = np.moveaxis(sample['left_camera'],-1,1)/255
-        # right_cam = np.moveaxis(sample['right_camera'],-1,1)/255
+        left_cam = np.moveaxis(sample["left_camera"], -1, 1) / 255
+        right_cam = np.moveaxis(sample["right_camera"], -1, 1) / 255
+        head_depth = sample["head_camera_depth"].astype(np.float32)
+        left_depth = sample["left_camera_depth"].astype(np.float32)
+        right_depth = sample["right_camera_depth"].astype(np.float32)
 
         data = {
             "obs": {
-                "head_cam": head_cam,  # T, 3, H, W
-                # 'front_cam': front_cam, # T, 3, H, W
-                # 'left_cam': left_cam, # T, 3, H, W
-                # 'right_cam': right_cam, # T, 3, H, W
-                "agent_pos": agent_pos,  # T, D
+                "head_cam": head_cam,
+                "left_cam": left_cam,
+                "right_cam": right_cam,
+                "head_depth": head_depth,
+                "left_depth": left_depth,
+                "right_depth": right_depth,
+                "agent_pos": agent_pos,
             },
-            "action": sample["action"].astype(np.float32),  # T, D
+            "action": sample["action"].astype(np.float32),
         }
         return data
 
@@ -134,19 +141,23 @@ class RobotImageDataset(BaseImageDataset):
     def postprocess(self, samples, device):
         agent_pos = samples["state"].to(device, non_blocking=True)
         head_cam = samples["head_camera"].to(device, non_blocking=True) / 255.0
-        # front_cam = samples['front_camera'].to(device, non_blocking=True) / 255.0
-        # left_cam = samples['left_camera'].to(device, non_blocking=True) / 255.0
-        # right_cam = samples['right_camera'].to(device, non_blocking=True) / 255.0
+        left_cam = samples["left_camera"].to(device, non_blocking=True) / 255.0
+        right_cam = samples["right_camera"].to(device, non_blocking=True) / 255.0
+        head_depth = samples["head_camera_depth"].to(device, non_blocking=True)
+        left_depth = samples["left_camera_depth"].to(device, non_blocking=True)
+        right_depth = samples["right_camera_depth"].to(device, non_blocking=True)
         action = samples["action"].to(device, non_blocking=True)
         return {
             "obs": {
-                "head_cam": head_cam,  # B, T, 3, H, W
-                # 'front_cam': front_cam, # B, T, 3, H, W
-                # 'left_cam': left_cam, # B, T, 3, H, W
-                # 'right_cam': right_cam, # B, T, 3, H, W
-                "agent_pos": agent_pos,  # B, T, D
+                "head_cam": head_cam,
+                "left_cam": left_cam,
+                "right_cam": right_cam,
+                "head_depth": head_depth,
+                "left_depth": left_depth,
+                "right_depth": right_depth,
+                "agent_pos": agent_pos,
             },
-            "action": action,  # B, T, D
+            "action": action,
         }
 
 

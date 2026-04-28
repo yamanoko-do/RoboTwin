@@ -5,7 +5,8 @@ ROOT_PATH = os.path.abspath(__file__)
 ROOT_PATH = ROOT_PATH[:ROOT_PATH.rfind("/")]
 ROOT_PATH = ROOT_PATH[:ROOT_PATH.rfind("/") + 1]
 
-ASSETS_PATH = os.path.join(ROOT_PATH, "assets/")
+# ASSETS_PATH = os.path.join(ROOT_PATH, "assets/")
+ASSETS_PATH = os.path.join("/mnt/workspace/yama/oss_yama/robotwin_data/assets")
 EMBODIMENTS_PATH = os.path.join(ASSETS_PATH, "embodiments/")
 TEXTURES_PATH = os.path.join(ASSETS_PATH, "background_texture/")
 CONFIGS_PATH = os.path.join(ROOT_PATH, "task_config/")

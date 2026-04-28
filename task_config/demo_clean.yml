@@ -11,7 +11,7 @@ domain_randomization:
   cluttered_table: false
   clean_background_rate: 1
   random_head_camera_dis: 0
-  random_table_height: 0
+  random_table_height: 0.05
   random_light: false
   crazy_random_light_rate: 0
 camera:
@@ -22,7 +22,7 @@ camera:
 data_type:
   rgb: true
   third_view: false
-  depth: false
+  depth: true
   pointcloud: false
   observer: false
   endpose: true
@@ -31,7 +31,7 @@ data_type:
   actor_segmentation: false
 pcd_down_sample_num: 1024
 pcd_crop: true
-save_path: ./data
+save_path: /mnt/workspace/yama/robotwin_data
 clear_cache_freq: 5
 collect_data: true
 eval_video_log: true

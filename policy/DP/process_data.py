@@ -26,10 +26,12 @@ def load_hdf5(dataset_path):
         )
         vector = root["/joint_action/vector"][()]
         image_dict = dict()
+        depth_dict = dict()
         for cam_name in root[f"/observation/"].keys():
             image_dict[cam_name] = root[f"/observation/{cam_name}/rgb"][()]
+            depth_dict[cam_name] = root[f"/observation/{cam_name}/depth"][()]
 
-    return left_gripper, left_arm, right_gripper, right_arm, vector, image_dict
+    return left_gripper, left_arm, right_gripper, right_arm, vector, image_dict, depth_dict
 
 
 def main():
@@ -51,7 +53,7 @@ def main():
     num = args.expert_data_num
     task_config = args.task_config
 
-    load_dir = "../../data/" + str(task_name) + "/" + str(task_config)
+    load_dir = "/mnt/workspace/yama/robotwin_data/" + str(task_name) + "/" + str(task_config)
 
     total_count = 0
 
@@ -66,12 +68,8 @@ def main():
     zarr_data = zarr_root.create_group("data")
     zarr_meta = zarr_root.create_group("meta")
 
-    head_camera_arrays, front_camera_arrays, left_camera_arrays, right_camera_arrays = (
-        [],
-        [],
-        [],
-        [],
-    )
+    head_camera_arrays, left_camera_arrays, right_camera_arrays = [], [], []
+    head_depth_arrays, left_depth_arrays, right_depth_arrays = [], [], []
     episode_ends_arrays, action_arrays, state_arrays, joint_action_arrays = (
         [],
         [],
@@ -90,16 +88,26 @@ def main():
             right_arm_all,
             vector_all,
             image_dict_all,
+            depth_dict_all,
         ) = load_hdf5(load_path)
 
         for j in range(0, left_gripper_all.shape[0]):
 
             head_img_bit = image_dict_all["head_camera"][j]
+            left_img_bit = image_dict_all["left_camera"][j]
+            right_img_bit = image_dict_all["right_camera"][j]
             joint_state = vector_all[j]
 
             if j != left_gripper_all.shape[0] - 1:
                 head_img = cv2.imdecode(np.frombuffer(head_img_bit, np.uint8), cv2.IMREAD_COLOR)
+                left_img = cv2.imdecode(np.frombuffer(left_img_bit, np.uint8), cv2.IMREAD_COLOR)
+                right_img = cv2.imdecode(np.frombuffer(right_img_bit, np.uint8), cv2.IMREAD_COLOR)
                 head_camera_arrays.append(head_img)
+                left_camera_arrays.append(left_img)
+                right_camera_arrays.append(right_img)
+                head_depth_arrays.append(depth_dict_all["head_camera"][j].astype(np.float32))
+                left_depth_arrays.append(depth_dict_all["left_camera"][j].astype(np.float32))
+                right_depth_arrays.append(depth_dict_all["right_camera"][j].astype(np.float32))
                 state_arrays.append(joint_state)
             if j != 0:
                 joint_action_arrays.append(joint_state)
@@ -113,19 +121,73 @@ def main():
     # action_arrays = np.array(action_arrays)
     state_arrays = np.array(state_arrays)
     head_camera_arrays = np.array(head_camera_arrays)
+    left_camera_arrays = np.array(left_camera_arrays)
+    right_camera_arrays = np.array(right_camera_arrays)
+    head_depth_arrays = np.array(head_depth_arrays)
+    left_depth_arrays = np.array(left_depth_arrays)
+    right_depth_arrays = np.array(right_depth_arrays)
     joint_action_arrays = np.array(joint_action_arrays)
 
     head_camera_arrays = np.moveaxis(head_camera_arrays, -1, 1)  # NHWC -> NCHW
+    left_camera_arrays = np.moveaxis(left_camera_arrays, -1, 1)  # NHWC -> NCHW
+    right_camera_arrays = np.moveaxis(right_camera_arrays, -1, 1)  # NHWC -> NCHW
+    head_depth_arrays = head_depth_arrays[:, np.newaxis, :, :]  # (N, H, W) -> (N, 1, H, W)
+    left_depth_arrays = left_depth_arrays[:, np.newaxis, :, :]
+    right_depth_arrays = right_depth_arrays[:, np.newaxis, :, :]
 
     compressor = zarr.Blosc(cname="zstd", clevel=3, shuffle=1)
     # action_chunk_size = (100, action_arrays.shape[1])
     state_chunk_size = (100, state_arrays.shape[1])
     joint_chunk_size = (100, joint_action_arrays.shape[1])
     head_camera_chunk_size = (100, *head_camera_arrays.shape[1:])
+    left_camera_chunk_size = (100, *left_camera_arrays.shape[1:])
+    right_camera_chunk_size = (100, *right_camera_arrays.shape[1:])
+    head_depth_chunk_size = (100, *head_depth_arrays.shape[1:])
+    left_depth_chunk_size = (100, *left_depth_arrays.shape[1:])
+    right_depth_chunk_size = (100, *right_depth_arrays.shape[1:])
+
     zarr_data.create_dataset(
         "head_camera",
         data=head_camera_arrays,
         chunks=head_camera_chunk_size,
+        overwrite=True,
+        compressor=compressor,
+    )
+    zarr_data.create_dataset(
+        "left_camera",
+        data=left_camera_arrays,
+        chunks=left_camera_chunk_size,
+        overwrite=True,
+        compressor=compressor,
+    )
+    zarr_data.create_dataset(
+        "right_camera",
+        data=right_camera_arrays,
+        chunks=right_camera_chunk_size,
+        overwrite=True,
+        compressor=compressor,
+    )
+    zarr_data.create_dataset(
+        "head_camera_depth",
+        data=head_depth_arrays,
+        chunks=head_depth_chunk_size,
+        dtype="float32",
+        overwrite=True,
+        compressor=compressor,
+    )
+    zarr_data.create_dataset(
+        "left_camera_depth",
+        data=left_depth_arrays,
+        chunks=left_depth_chunk_size,
+        dtype="float32",
+        overwrite=True,
+        compressor=compressor,
+    )
+    zarr_data.create_dataset(
+        "right_camera_depth",
+        data=right_depth_arrays,
+        chunks=right_depth_chunk_size,
+        dtype="float32",
         overwrite=True,
         compressor=compressor,
     )
