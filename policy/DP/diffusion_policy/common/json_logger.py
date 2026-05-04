@@ -58,6 +58,7 @@ class JsonLogger:
         # Move the pointer (similar to a cursor in a text editor) to the end of the file
         pos = file.seek(0, os.SEEK_END)
 
+        # Move the pointer (similar to a cursor in a text editor) to the end of the file
         # Read each character in the file one at a time from the last
         # character going backwards, searching for a newline character
         # If we find a new line, exit the search
@@ -80,7 +81,11 @@ class JsonLogger:
         if last_line_start < last_line_end:
             # has last line of json
             last_line = file.readline()
-            self.last_log = json.loads(last_line)
+            try:
+                self.last_log = json.loads(last_line)
+            except json.JSONDecodeError:
+                # corrupted file (e.g. from concurrent writes) — skip
+                self.last_log = None
 
         # remove the last incomplete line
         file.seek(last_line_end)

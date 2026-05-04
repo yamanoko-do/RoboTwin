@@ -10,7 +10,7 @@ handover_block: 800
 handover_mic: 600
 lift_pot: 400
 move_can_pot: 400
-move_playingcard_away: 400
+move_playingcard_away: 150
 move_stapler_pad: 400
 hanging_mug: 900
 open_laptop: 700

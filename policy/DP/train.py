@@ -5,10 +5,16 @@ python train.py --config-name=train_diffusion_lowdim_workspace
 """
 
 import sys
+import os
 
 # use line-buffering for both stdout and stderr
 sys.stdout = open(sys.stdout.fileno(), mode="w", buffering=1)
 sys.stderr = open(sys.stderr.fileno(), mode="w", buffering=1)
+
+# Add lingbot-depth to Python path so MDMModel can be imported
+_lingbot_depth_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "lingbot-depth")
+if os.path.isdir(_lingbot_depth_path) and _lingbot_depth_path not in sys.path:
+    sys.path.insert(0, _lingbot_depth_path)
 
 import hydra, pdb
 from omegaconf import OmegaConf
@@ -46,19 +52,22 @@ def main(cfg: OmegaConf):
     # will use the same time.
     head_camera_type = cfg.head_camera_type
     head_camera_cfg = get_camera_config(head_camera_type)
-    cfg.task.image_shape = [3, head_camera_cfg["h"], head_camera_cfg["w"]]
-    cfg.task.shape_meta.obs.head_cam.shape = [
-        3,
-        head_camera_cfg["h"],
-        head_camera_cfg["w"],
-    ]
+    h, w = head_camera_cfg["h"], head_camera_cfg["w"]
+
+    def _override_obs_shapes(cfg, h, w):
+        """Set concrete shapes for all obs keys (replace -1 placeholders)."""
+        for key, attr in cfg.task.shape_meta.obs.items():
+            obs_type = attr.get("type", "low_dim")
+            if obs_type == "rgb":
+                attr.shape = [3, h, w]
+            elif obs_type == "depth":
+                attr.shape = [1, h, w]
+
+    cfg.task.image_shape = [3, h, w]
+    _override_obs_shapes(cfg, h, w)
     OmegaConf.resolve(cfg)
-    cfg.task.image_shape = [3, head_camera_cfg["h"], head_camera_cfg["w"]]
-    cfg.task.shape_meta.obs.head_cam.shape = [
-        3,
-        head_camera_cfg["h"],
-        head_camera_cfg["w"],
-    ]
+    cfg.task.image_shape = [3, h, w]
+    _override_obs_shapes(cfg, h, w)
 
     cls = hydra.utils.get_class(cfg._target_)
     workspace: BaseWorkspace = cls(cfg)

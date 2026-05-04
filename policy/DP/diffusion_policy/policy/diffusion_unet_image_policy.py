@@ -40,6 +40,10 @@ class DiffusionUnetImagePolicy(BaseImagePolicy):
         assert len(action_shape) == 1
         action_dim = action_shape[0]
         # get feature dim
+        # Move obs_encoder to CUDA before output_shape() dry-run,
+        # since xformers attention (used by LingBotDepth) requires CUDA tensors.
+        if torch.cuda.is_available():
+            obs_encoder = obs_encoder.to(torch.device("cuda"))
         obs_feature_dim = obs_encoder.output_shape()[0]
 
         # create diffusion model
@@ -256,3 +260,6 @@ class DiffusionUnetImagePolicy(BaseImagePolicy):
         loss = reduce(loss, "b ... -> b (...)", "mean")
         loss = loss.mean()
         return loss
+
+    def forward(self, batch):
+        return self.compute_loss(batch)

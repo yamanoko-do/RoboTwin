@@ -107,16 +107,71 @@ def _prepare_args(task_name, task_config, head_camera_type):
     return args, video_size
 
 
+def find_successful_seeds(task_name, task_config, seed, head_camera_type,
+                          num_episodes=8, max_attempts=500):
+    """
+    Run expert demonstrations to find seeds where the expert succeeds.
+    This is called once before training starts, on rank 0 only.
+
+    Returns:
+        list of int: seeds where expert check passed, length == num_episodes
+    """
+    from envs.utils.create_actor import UnStableError
+
+    args, _ = _prepare_args(task_name, task_config, head_camera_type)
+    args["render_freq"] = 0
+    args["eval_mode"] = True
+    args["gpu_id"] = 0  # rank 0 only
+
+    TASK_ENV = _class_decorator(task_name)
+
+    st_seed = 100000 * (1 + seed)
+    successful_seeds = []
+    now_seed = st_seed
+    now_id = 0
+
+    print(f"\033[93m[SeedSearch] Searching for {num_episodes} successful seeds (max {max_attempts} attempts)...\033[0m")
+
+    while len(successful_seeds) < num_episodes and now_seed - st_seed < max_attempts:
+        try:
+            TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
+            episode_info = TASK_ENV.play_once()
+            TASK_ENV.close_env()
+        except (UnStableError, Exception):
+            TASK_ENV.close_env()
+            now_seed += 1
+            continue
+
+        if TASK_ENV.plan_success and TASK_ENV.check_success():
+            successful_seeds.append(now_seed)
+            print(f"\033[92m[SeedSearch] Found seed {now_seed} ({len(successful_seeds)}/{num_episodes})\033[0m")
+        now_seed += 1
+        now_id += 1
+
+    if len(successful_seeds) < num_episodes:
+        print(f"\033[91m[SeedSearch] Warning: only found {len(successful_seeds)} successful seeds "
+              f"after {max_attempts} attempts\033[0m")
+
+    print(f"\033[96m[SeedSearch] Done. Seeds: {successful_seeds}\033[0m")
+    return successful_seeds
+
+
 def run_eval_episodes(policy, n_obs_steps, n_action_steps,
                       task_name, task_config, seed, head_camera_type,
-                      num_episodes=10, instruction_type="unseen"):
+                      num_episodes=10, instruction_type="unseen",
+                      rank=0, world_size=1,
+                      pre_collected_seeds=None):
     """
     Run policy evaluation during training.
 
+    Args:
+        pre_collected_seeds: list of seeds where expert check already passed.
+            If provided, skip expert_check and use these seeds directly,
+            distributed across ranks. This avoids the NCCL timeout caused by
+            uneven expert_check retry times across ranks.
+
     Returns:
         (success_rate, num_success, num_total, selected_video_path)
-        selected_video_path is the mp4 of the first successful episode,
-        or the first episode if none succeeded, or None if no episodes ran.
     """
     from envs.utils.create_actor import UnStableError
     from sapien.render import clear_cache as sapien_clear_cache
@@ -125,12 +180,15 @@ def run_eval_episodes(policy, n_obs_steps, n_action_steps,
     dp_deploy = importlib.import_module("policy.DP.deploy_policy")
     eval_func = dp_deploy.eval
     reset_func = dp_deploy.reset_model
-    encode_obs_func = dp_deploy.encode_obs
 
     # import instruction generator
     from generate_episode_instructions import generate_episode_descriptions
 
     args, video_size = _prepare_args(task_name, task_config, head_camera_type)
+
+    # Set gpu_id for SAPIEN renderer device isolation
+    gpu_id = int(os.environ.get("LOCAL_RANK", rank))
+    args["gpu_id"] = gpu_id
 
     # Setup video recording
     tmp_video_dir = tempfile.mkdtemp(prefix="tmp_eval_video_")
@@ -144,103 +202,172 @@ def run_eval_episodes(policy, n_obs_steps, n_action_steps,
 
     TASK_ENV.suc = 0
     TASK_ENV.test_num = 0
-
-    st_seed = 100000 * (1 + seed)
-    now_seed = st_seed
-    now_id = 0
-    succ_seed = 0
     clear_cache_freq = args["clear_cache_freq"]
-
-    expert_check = True
     episode_records = []  # (video_path, success)
 
-    while succ_seed < num_episodes:
-        render_freq = args["render_freq"]
-        args["render_freq"] = 0
+    if pre_collected_seeds is not None:
+        # Use pre-collected seeds: distribute across ranks
+        my_seeds = pre_collected_seeds[rank::world_size]
+        print(f"\033[93m[Eval] Rank {rank} running {len(my_seeds)} episodes with pre-collected seeds {my_seeds}\033[0m")
+        for ep_idx, eval_seed in enumerate(my_seeds):
+            # Setup episode for policy evaluation
+            TASK_ENV.setup_demo(now_ep_num=ep_idx, seed=eval_seed, is_test=True, **args)
+            # Get episode info for instruction generation
+            episode_info = TASK_ENV.play_once()
+            TASK_ENV.close_env()
+            # Re-setup for policy eval
+            TASK_ENV.setup_demo(now_ep_num=ep_idx, seed=eval_seed, is_test=True, **args)
+            episode_info_list = [episode_info["info"]]
+            results = generate_episode_descriptions(task_name, episode_info_list, num_episodes)
+            instruction = np.random.choice(results[0][instruction_type])
+            TASK_ENV.set_instruction(instruction=instruction)
 
-        if expert_check:
-            try:
-                TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
-                episode_info = TASK_ENV.play_once()
-                TASK_ENV.close_env()
-            except UnStableError:
-                TASK_ENV.close_env()
-                now_seed += 1
-                args["render_freq"] = render_freq
-                continue
-            except Exception:
-                TASK_ENV.close_env()
-                now_seed += 1
-                args["render_freq"] = render_freq
-                continue
+            # Start ffmpeg for video recording
+            if TASK_ENV.eval_video_path is not None:
+                ep_video_path = os.path.join(TASK_ENV.eval_video_path, f"episode{TASK_ENV.test_num}.mp4")
+                ffmpeg = subprocess.Popen(
+                    [
+                        "ffmpeg", "-y", "-loglevel", "error",
+                        "-f", "rawvideo", "-pixel_format", "rgb24",
+                        "-video_size", video_size, "-framerate", "10",
+                        "-i", "-",
+                        "-pix_fmt", "yuv420p", "-vcodec", "libx264",
+                        "-crf", "23", ep_video_path,
+                    ],
+                    stdin=subprocess.PIPE,
+                )
+                TASK_ENV._set_eval_video_ffmpeg(ffmpeg)
 
-        if (not expert_check) or (TASK_ENV.plan_success and TASK_ENV.check_success()):
-            succ_seed += 1
-        else:
-            now_seed += 1
-            args["render_freq"] = render_freq
-            continue
+            # Run policy
+            succ = False
+            reset_func(model)
+            while TASK_ENV.take_action_cnt < TASK_ENV.step_lim:
+                observation = TASK_ENV.get_obs()
+                eval_func(TASK_ENV, model, observation)
+                if TASK_ENV.eval_success:
+                    succ = True
+                    break
 
-        args["render_freq"] = render_freq
+            if TASK_ENV.eval_video_path is not None:
+                TASK_ENV._del_eval_video_ffmpeg()
 
-        # Setup episode for policy evaluation
-        TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
-        episode_info_list = [episode_info["info"]]
-        results = generate_episode_descriptions(task_name, episode_info_list, num_episodes)
-        instruction = np.random.choice(results[0][instruction_type])
-        TASK_ENV.set_instruction(instruction=instruction)
+            if succ:
+                TASK_ENV.suc += 1
+                print(f"\033[92m[Eval] Success!\033[0m")
+            else:
+                print(f"\033[91m[Eval] Fail!\033[0m")
 
-        # Start ffmpeg for video recording
-        if TASK_ENV.eval_video_path is not None:
-            ep_video_path = os.path.join(TASK_ENV.eval_video_path, f"episode{TASK_ENV.test_num}.mp4")
-            ffmpeg = subprocess.Popen(
-                [
-                    "ffmpeg", "-y", "-loglevel", "error",
-                    "-f", "rawvideo", "-pixel_format", "rgb24",
-                    "-video_size", video_size, "-framerate", "10",
-                    "-i", "-",
-                    "-pix_fmt", "yuv420p", "-vcodec", "libx264",
-                    "-crf", "23", ep_video_path,
-                ],
-                stdin=subprocess.PIPE,
+            # Record episode video
+            ep_video_path = os.path.join(tmp_video_dir, f"episode{TASK_ENV.test_num}.mp4")
+            if os.path.exists(ep_video_path):
+                episode_records.append((ep_video_path, succ))
+
+            TASK_ENV.close_env(clear_cache=((ep_idx + 1) % clear_cache_freq == 0))
+            if TASK_ENV.render_freq:
+                TASK_ENV.viewer.close()
+            TASK_ENV.test_num += 1
+            print(
+                f"[Eval] {task_name} | {task_config}\n"
+                f"Success rate: {TASK_ENV.suc}/{TASK_ENV.test_num} => "
+                f"{round(TASK_ENV.suc / max(TASK_ENV.test_num, 1) * 100, 1)}%"
             )
-            TASK_ENV._set_eval_video_ffmpeg(ffmpeg)
+    else:
+        # Fallback: original expert_check logic (for single-GPU or non-distributed use)
+        st_seed = 100000 * (1 + seed)
+        local_num_episodes = (num_episodes + world_size - 1) // world_size
+        st_seed = st_seed + rank * 1000
+        now_seed = st_seed
+        now_id = 0
+        succ_seed = 0
+        expert_check = True
 
-        # Run policy
-        succ = False
-        reset_func(model)
-        while TASK_ENV.take_action_cnt < TASK_ENV.step_lim:
-            observation = TASK_ENV.get_obs()
-            eval_func(TASK_ENV, model, observation)
-            if TASK_ENV.eval_success:
-                succ = True
-                break
+        while succ_seed < local_num_episodes:
+            render_freq = args["render_freq"]
+            args["render_freq"] = 0
 
-        if TASK_ENV.eval_video_path is not None:
-            TASK_ENV._del_eval_video_ffmpeg()
+            if expert_check:
+                try:
+                    TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
+                    episode_info = TASK_ENV.play_once()
+                    TASK_ENV.close_env()
+                except UnStableError:
+                    TASK_ENV.close_env()
+                    now_seed += 1
+                    args["render_freq"] = render_freq
+                    continue
+                except Exception:
+                    TASK_ENV.close_env()
+                    now_seed += 1
+                    args["render_freq"] = render_freq
+                    continue
 
-        if succ:
-            TASK_ENV.suc += 1
-            print(f"\033[92m[Eval] Success!\033[0m")
-        else:
-            print(f"\033[91m[Eval] Fail!\033[0m")
+            if (not expert_check) or (TASK_ENV.plan_success and TASK_ENV.check_success()):
+                succ_seed += 1
+            else:
+                now_seed += 1
+                args["render_freq"] = render_freq
+                continue
 
-        # Record episode video
-        ep_video_path = os.path.join(tmp_video_dir, f"episode{TASK_ENV.test_num}.mp4")
-        if os.path.exists(ep_video_path):
-            episode_records.append((ep_video_path, succ))
+            args["render_freq"] = render_freq
 
-        now_id += 1
-        TASK_ENV.close_env(clear_cache=((succ_seed + 1) % clear_cache_freq == 0))
-        if TASK_ENV.render_freq:
-            TASK_ENV.viewer.close()
-        TASK_ENV.test_num += 1
-        print(
-            f"[Eval] {task_name} | {task_config}\n"
-            f"Success rate: {TASK_ENV.suc}/{TASK_ENV.test_num} => "
-            f"{round(TASK_ENV.suc / max(TASK_ENV.test_num, 1) * 100, 1)}%"
-        )
-        now_seed += 1
+            # Setup episode for policy evaluation
+            TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
+            episode_info_list = [episode_info["info"]]
+            results = generate_episode_descriptions(task_name, episode_info_list, num_episodes)
+            instruction = np.random.choice(results[0][instruction_type])
+            TASK_ENV.set_instruction(instruction=instruction)
+
+            # Start ffmpeg for video recording
+            if TASK_ENV.eval_video_path is not None:
+                ep_video_path = os.path.join(TASK_ENV.eval_video_path, f"episode{TASK_ENV.test_num}.mp4")
+                ffmpeg = subprocess.Popen(
+                    [
+                        "ffmpeg", "-y", "-loglevel", "error",
+                        "-f", "rawvideo", "-pixel_format", "rgb24",
+                        "-video_size", video_size, "-framerate", "10",
+                        "-i", "-",
+                        "-pix_fmt", "yuv420p", "-vcodec", "libx264",
+                        "-crf", "23", ep_video_path,
+                    ],
+                    stdin=subprocess.PIPE,
+                )
+                TASK_ENV._set_eval_video_ffmpeg(ffmpeg)
+
+            # Run policy
+            succ = False
+            reset_func(model)
+            while TASK_ENV.take_action_cnt < TASK_ENV.step_lim:
+                observation = TASK_ENV.get_obs()
+                eval_func(TASK_ENV, model, observation)
+                if TASK_ENV.eval_success:
+                    succ = True
+                    break
+
+            if TASK_ENV.eval_video_path is not None:
+                TASK_ENV._del_eval_video_ffmpeg()
+
+            if succ:
+                TASK_ENV.suc += 1
+                print(f"\033[92m[Eval] Success!\033[0m")
+            else:
+                print(f"\033[91m[Eval] Fail!\033[0m")
+
+            # Record episode video
+            ep_video_path = os.path.join(tmp_video_dir, f"episode{TASK_ENV.test_num}.mp4")
+            if os.path.exists(ep_video_path):
+                episode_records.append((ep_video_path, succ))
+
+            now_id += 1
+            TASK_ENV.close_env(clear_cache=((succ_seed + 1) % clear_cache_freq == 0))
+            if TASK_ENV.render_freq:
+                TASK_ENV.viewer.close()
+            TASK_ENV.test_num += 1
+            print(
+                f"[Eval] {task_name} | {task_config}\n"
+                f"Success rate: {TASK_ENV.suc}/{TASK_ENV.test_num} => "
+                f"{round(TASK_ENV.suc / max(TASK_ENV.test_num, 1) * 100, 1)}%"
+            )
+            now_seed += 1
 
     # Select video: first successful, or first episode
     selected_video = None

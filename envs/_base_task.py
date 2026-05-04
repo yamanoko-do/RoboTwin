@@ -87,7 +87,7 @@ class Base_Task(gym.Env):
         self.plan_success = True
         self.step_lim = None
         self.fix_gripper = False
-        self.setup_scene()
+        self.setup_scene(gpu_id=kwags.get("gpu_id", 0))
 
         self.left_js = None
         self.right_js = None
@@ -197,17 +197,18 @@ class Base_Task(gym.Env):
     def check_success(self):
         pass
 
-    def setup_scene(self, **kwargs):
+    def setup_scene(self, gpu_id=0, **kwargs):
         """
         Set the scene
             - Set up the basic scene: light source, viewer.
         """
+        self.gpu_id = gpu_id
         self.engine = sapien.Engine()
         # declare sapien renderer
         from sapien.render import set_global_config
 
         set_global_config(max_num_materials=50000, max_num_textures=50000)
-        self.renderer = sapien.SapienRenderer()
+        self.renderer = sapien.SapienRenderer(device=sapien.Device(f'cuda:{gpu_id}'))
         # give renderer to sapien sim
         self.engine.set_renderer(self.renderer)
 
@@ -1485,7 +1486,7 @@ class Base_Task(gym.Env):
             self.eval_video_ffmpeg.stdin.write(self.now_obs["observation"]["head_camera"]["rgb"].tobytes())
 
         self.take_action_cnt += 1
-        print(f"step: \033[92m{self.take_action_cnt} / {self.step_lim}\033[0m", end="\r")
+        print(f"step: \033[92m{self.take_action_cnt} / {self.step_lim}\033[0m", flush=True)
 
         self._update_render()
         if self.render_freq:

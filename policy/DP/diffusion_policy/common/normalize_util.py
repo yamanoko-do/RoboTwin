@@ -33,6 +33,24 @@ def get_image_range_normalizer():
     return SingleFieldLinearNormalizer.create_manual(scale=scale, offset=offset, input_stats_dict=stat)
 
 
+def get_depth_identity_normalizer():
+    """Identity normalizer for depth data (passthrough, no scaling).
+
+    Used when depth is consumed by LingBotDepth which handles its own
+    internal preprocessing (log remapping, masking, etc.). Depth values
+    should already be in meters after dataset-level scaling.
+    """
+    scale = np.array([1], dtype=np.float32)
+    offset = np.array([0], dtype=np.float32)
+    stat = {
+        "min": np.array([0], dtype=np.float32),
+        "max": np.array([1], dtype=np.float32),
+        "mean": np.array([0.5], dtype=np.float32),
+        "std": np.array([0.5], dtype=np.float32),
+    }
+    return SingleFieldLinearNormalizer.create_manual(scale=scale, offset=offset, input_stats_dict=stat)
+
+
 def get_identity_normalizer_from_stat(stat):
     scale = np.ones_like(stat["min"])
     offset = np.zeros_like(stat["min"])

@@ -12,7 +12,7 @@ from diffusion_policy.common.sampler import (
 )
 from diffusion_policy.model.common.normalizer import LinearNormalizer
 from diffusion_policy.dataset.base_dataset import BaseImageDataset
-from diffusion_policy.common.normalize_util import get_image_range_normalizer
+from diffusion_policy.common.normalize_util import get_image_range_normalizer, get_depth_identity_normalizer
 import pdb
 
 
@@ -28,6 +28,7 @@ class RobotImageDataset(BaseImageDataset):
         val_ratio=0.0,
         batch_size=128,
         max_train_episodes=None,
+        depth_scale: float = 1.0,
     ):
 
         super().__init__()
@@ -64,6 +65,19 @@ class RobotImageDataset(BaseImageDataset):
         for v in self.buffers_torch.values():
             v.pin_memory()
 
+        self.depth_scale = depth_scale
+
+    def _resize_buffers(self, new_batch_size):
+        sequence_length = self.sampler.sequence_length
+        self.batch_size = new_batch_size
+        self.buffers = {
+            k: np.zeros((new_batch_size, sequence_length, *v.shape[1:]), dtype=v.dtype)
+            for k, v in self.sampler.replay_buffer.items()
+        }
+        self.buffers_torch = {k: torch.from_numpy(v) for k, v in self.buffers.items()}
+        for v in self.buffers_torch.values():
+            v.pin_memory()
+
     def get_validation_dataset(self):
         val_set = copy.copy(self)
         val_set.sampler = SequenceSampler(
@@ -86,9 +100,16 @@ class RobotImageDataset(BaseImageDataset):
         normalizer["head_cam"] = get_image_range_normalizer()
         normalizer["left_cam"] = get_image_range_normalizer()
         normalizer["right_cam"] = get_image_range_normalizer()
-        normalizer["head_depth"] = get_image_range_normalizer()
-        normalizer["left_depth"] = get_image_range_normalizer()
-        normalizer["right_depth"] = get_image_range_normalizer()
+        if self.depth_scale > 1.0:
+            # Depth is in meters after scaling — use identity normalizer
+            # so LingBotDepth receives raw meter values
+            normalizer["head_depth"] = get_depth_identity_normalizer()
+            normalizer["left_depth"] = get_depth_identity_normalizer()
+            normalizer["right_depth"] = get_depth_identity_normalizer()
+        else:
+            normalizer["head_depth"] = get_image_range_normalizer()
+            normalizer["left_depth"] = get_image_range_normalizer()
+            normalizer["right_depth"] = get_image_range_normalizer()
         return normalizer
 
     def __len__(self) -> int:
@@ -99,9 +120,9 @@ class RobotImageDataset(BaseImageDataset):
         head_cam = np.moveaxis(sample["head_camera"], -1, 1) / 255
         left_cam = np.moveaxis(sample["left_camera"], -1, 1) / 255
         right_cam = np.moveaxis(sample["right_camera"], -1, 1) / 255
-        head_depth = sample["head_camera_depth"].astype(np.float32)
-        left_depth = sample["left_camera_depth"].astype(np.float32)
-        right_depth = sample["right_camera_depth"].astype(np.float32)
+        head_depth = sample["head_camera_depth"].astype(np.float32) / self.depth_scale
+        left_depth = sample["left_camera_depth"].astype(np.float32) / self.depth_scale
+        right_depth = sample["right_camera_depth"].astype(np.float32) / self.depth_scale
 
         data = {
             "obs": {
@@ -143,9 +164,9 @@ class RobotImageDataset(BaseImageDataset):
         head_cam = samples["head_camera"].to(device, non_blocking=True) / 255.0
         left_cam = samples["left_camera"].to(device, non_blocking=True) / 255.0
         right_cam = samples["right_camera"].to(device, non_blocking=True) / 255.0
-        head_depth = samples["head_camera_depth"].to(device, non_blocking=True)
-        left_depth = samples["left_camera_depth"].to(device, non_blocking=True)
-        right_depth = samples["right_camera_depth"].to(device, non_blocking=True)
+        head_depth = samples["head_camera_depth"].to(device, non_blocking=True) / self.depth_scale
+        left_depth = samples["left_camera_depth"].to(device, non_blocking=True) / self.depth_scale
+        right_depth = samples["right_camera_depth"].to(device, non_blocking=True) / self.depth_scale
         action = samples["action"].to(device, non_blocking=True)
         return {
             "obs": {

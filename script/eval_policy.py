@@ -177,8 +177,8 @@ def main(usr_args):
     seed = usr_args["seed"]
 
     st_seed = 100000 * (1 + seed)
-    suc_nums = []
-    test_num = 100
+    # Support --test_num override (default 100)
+    test_num = usr_args.get("test_num", 100)
     topk = 1
 
     model = get_model(usr_args)

@@ -13,6 +13,14 @@ def encode_obs(observation):
         left_cam=left_cam,
         right_cam=right_cam,
     )
+    # Add depth observations (used by rgbd configs B and C, ignored by baseline)
+    head_depth = observation["observation"]["head_camera"]["depth"].astype(np.float32)
+    obs["head_depth"] = head_depth[np.newaxis]  # (1, H, W)
+    if "left_camera" in observation["observation"]:
+        left_depth = observation["observation"]["left_camera"]["depth"].astype(np.float32)
+        right_depth = observation["observation"]["right_camera"]["depth"].astype(np.float32)
+        obs["left_depth"] = left_depth[np.newaxis]
+        obs["right_depth"] = right_depth[np.newaxis]
     obs["agent_pos"] = observation["joint_action"]["vector"]
     return obs
 

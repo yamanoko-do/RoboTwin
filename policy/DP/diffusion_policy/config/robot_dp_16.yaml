@@ -97,6 +97,7 @@ optimizer:
 
 training:
   device: "cuda:0"
+  dist_mode: False
   seed: 42
   debug: False
   resume: True

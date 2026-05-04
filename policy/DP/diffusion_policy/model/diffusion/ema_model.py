@@ -1,6 +1,7 @@
 import copy
 import torch
 from torch.nn.modules.batchnorm import _BatchNorm
+from torch.nn.parallel import DistributedDataParallel
 
 
 class EMAModel:
@@ -56,6 +57,10 @@ class EMAModel:
 
     @torch.no_grad()
     def step(self, new_model):
+        # Unwrap DDP so .modules() aligns with averaged_model
+        if isinstance(new_model, DistributedDataParallel):
+            new_model = new_model.module
+
         self.decay = self.get_decay(self.optimization_step)
 
         # old_all_dataptrs = set()

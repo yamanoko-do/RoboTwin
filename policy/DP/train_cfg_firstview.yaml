@@ -1,0 +1,99 @@
+# train_cfg_firstview.yaml — Config C: Human-like (head-only RGB + Depth)
+# head RGB (resnet18) + head depth (lingbotdepth)
+#
+# Usage:
+#   bash train_eval_loop.sh cfg=train_cfg_firstview.yaml
+
+# ==================== Hydra Config ====================
+hydra:
+  config_name: firstview_rgbdepth_actdim_14
+
+# ==================== Task & Data ====================
+task:
+  name: move_playingcard_away
+  config: demo_clean
+  zarr_path: /mnt/workspace/yama/RoboTwin/policy/DP/data/move_playingcard_away-demo_clean-50.zarr
+
+# ==================== Pipeline ====================
+pipeline:
+  total_epochs: 500
+  eval_every: 50
+  eval_episodes: 8
+  device: "0,1,2,3,4,5,6,7"
+  seed: 42
+  head_camera_type: D435
+  experiment_name: "20260502_firstview_rgbdepth"
+
+# ==================== Training ====================
+training:
+  num_epochs: 500
+  lr_total_epochs: 500
+  dist_mode: True
+  resume: True
+  seed: 42
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  gradient_accumulate_every: 1
+  use_ema: True
+  freeze_encoder: True
+  val_every: 1
+  sample_every: 5
+  max_train_steps: null
+  max_val_steps: null
+  tqdm_interval_sec: 1.0
+  checkpoint_every: 10
+  log_every: 10
+  debug: False
+
+# ==================== Optimizer ====================
+optimizer:
+  lr: 1.0e-4
+  betas: [0.95, 0.999]
+  eps: 1.0e-8
+  weight_decay: 1.0e-6
+
+# ==================== Dataloader ====================
+dataloader:
+  batch_size: 32
+  num_workers: 0
+  shuffle: True
+  pin_memory: True
+  persistent_workers: False
+
+val_dataloader:
+  batch_size: 64
+  num_workers: 0
+  shuffle: False
+  pin_memory: True
+  persistent_workers: False
+
+# ==================== Policy ====================
+policy:
+  horizon: 8
+  n_obs_steps: 3
+  n_action_steps: 6
+  n_latency_steps: 0
+  obs_as_global_cond: True
+  num_inference_steps: 100
+  diffusion_step_embed_dim: 128
+  down_dims: [256, 512, 1024]
+  kernel_size: 5
+  n_groups: 8
+  cond_predict_scale: True
+
+# ==================== Dataset ====================
+dataset:
+  val_ratio: 0.02
+  max_train_episodes: null
+
+# ==================== Logging ====================
+logging:
+  project: diffusion_policy_debug
+  resume: True
+  mode: online
+  id: null
+  group: null
+
+# ==================== Eval ====================
+eval:
+  instruction_type: unseen

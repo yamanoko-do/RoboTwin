@@ -7,6 +7,7 @@ from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf
 import dill
 import torch
+from torch.nn.parallel import DistributedDataParallel
 import threading
 
 
@@ -56,10 +57,15 @@ class BaseWorkspace:
             if hasattr(value, "state_dict") and hasattr(value, "load_state_dict"):
                 # modules, optimizers and samplers etc
                 if key not in exclude_keys:
-                    if use_thread:
-                        payload["state_dicts"][key] = _copy_to_cpu(value.state_dict())
+                    # For DDP-wrapped models, use module.state_dict() to avoid 'module.' prefix
+                    if isinstance(value, DistributedDataParallel):
+                        state_dict = value.module.state_dict()
                     else:
-                        payload["state_dicts"][key] = value.state_dict()
+                        state_dict = value.state_dict()
+                    if use_thread:
+                        payload["state_dicts"][key] = _copy_to_cpu(state_dict)
+                    else:
+                        payload["state_dicts"][key] = state_dict
             elif key in include_keys:
                 payload["pickles"][key] = dill.dumps(value)
         if use_thread:
@@ -81,7 +87,11 @@ class BaseWorkspace:
 
         for key, value in payload["state_dicts"].items():
             if key not in exclude_keys:
-                self.__dict__[key].load_state_dict(value, **kwargs)
+                target = self.__dict__[key]
+                if isinstance(target, DistributedDataParallel):
+                    target.module.load_state_dict(value, **kwargs)
+                else:
+                    target.load_state_dict(value, **kwargs)
         for key in include_keys:
             if key in payload["pickles"]:
                 self.__dict__[key] = dill.loads(payload["pickles"][key])
@@ -91,13 +101,13 @@ class BaseWorkspace:
             path = self.get_checkpoint_path(tag=tag)
         else:
             path = pathlib.Path(path)
-        payload = torch.load(path.open("rb"), pickle_module=dill, **kwargs)
+        payload = torch.load(path.open("rb"), pickle_module=dill, map_location="cpu", **kwargs)
         self.load_payload(payload, exclude_keys=exclude_keys, include_keys=include_keys)
         return payload
 
     @classmethod
     def create_from_checkpoint(cls, path, exclude_keys=None, include_keys=None, **kwargs):
-        payload = torch.load(open(path, "rb"), pickle_module=dill)
+        payload = torch.load(open(path, "rb"), pickle_module=dill, map_location="cpu")
         instance = cls(payload["cfg"])
         instance.load_payload(
             payload=payload,
