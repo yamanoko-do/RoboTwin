@@ -160,7 +160,8 @@ def run_eval_episodes(policy, n_obs_steps, n_action_steps,
                       task_name, task_config, seed, head_camera_type,
                       num_episodes=10, instruction_type="unseen",
                       rank=0, world_size=1,
-                      pre_collected_seeds=None):
+                      pre_collected_seeds=None, epoch=0, gpu_rank=0,
+                      experiment_name=""):
     """
     Run policy evaluation during training.
 
@@ -369,22 +370,25 @@ def run_eval_episodes(policy, n_obs_steps, n_action_steps,
             )
             now_seed += 1
 
-    # Select video: first successful, or first episode
-    selected_video = None
-    for ep_path, ep_succ in episode_records:
-        if ep_succ:
-            selected_video = ep_path
-            break
-    if selected_video is None and episode_records:
-        selected_video = episode_records[0][0]
+    # Save all episode videos to per-epoch persistent directory
+    # Structure: eval_videos/{experiment_name}/eval_epoch{N}/gpu{rank}_ep{i}_{success|fail}.mp4
+    exp_dir = experiment_name if experiment_name else f"{task_name}_{task_config}"
+    persistent_base = os.path.join(_ROBOTWIN_ROOT, "policy", "DP", "data", "eval_videos", exp_dir)
+    epoch_dir = os.path.join(persistent_base, f"eval_epoch{epoch}")
+    os.makedirs(epoch_dir, exist_ok=True)
 
-    # Copy selected video to a persistent location before cleaning tmp
-    if selected_video is not None:
-        persistent_dir = os.path.join(_ROBOTWIN_ROOT, "policy", "DP", "data", "eval_videos")
-        os.makedirs(persistent_dir, exist_ok=True)
-        persistent_path = os.path.join(persistent_dir, f"epoch_eval_{task_name}.mp4")
-        shutil.copy2(selected_video, persistent_path)
-        selected_video = persistent_path
+    selected_video = None
+    for ep_idx, (ep_path, ep_succ) in enumerate(episode_records):
+        label = "success" if ep_succ else "fail"
+        dest_name = f"gpu{gpu_rank}_ep{ep_idx}_{label}.mp4"
+        dest_path = os.path.join(epoch_dir, dest_name)
+        shutil.copy2(ep_path, dest_path)
+        # Pick first success video for SwanLab, or first episode if none succeeded
+        if selected_video is None and ep_succ:
+            selected_video = dest_path
+
+    if selected_video is None and episode_records:
+        selected_video = os.path.join(epoch_dir, f"gpu{gpu_rank}_ep0_fail.mp4")
 
     # Cleanup
     sapien_clear_cache()

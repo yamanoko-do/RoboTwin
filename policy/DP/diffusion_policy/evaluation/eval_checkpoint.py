@@ -57,6 +57,7 @@ def main():
     parser.add_argument("--epoch", type=int, default=0)
     parser.add_argument("--rank", type=int, default=0)
     parser.add_argument("--world_size", type=int, default=1)
+    parser.add_argument("--experiment_name", default="")
     args = parser.parse_args()
 
     # CUDA_VISIBLE_DEVICES is set by the parent process via env,
@@ -136,6 +137,9 @@ def main():
         rank=0,
         world_size=1,
         pre_collected_seeds=my_seeds,
+        epoch=args.epoch,
+        gpu_rank=args.rank,
+        experiment_name=args.experiment_name,
     )
 
     print(f"\033[96m[Eval rank {args.rank}] Epoch {args.epoch}: {num_success}/{num_total} = {success_rate:.1%}\033[0m")

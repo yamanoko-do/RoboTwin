@@ -1,12 +1,14 @@
-# train_cfg_firstview.yaml — Config C: Human-like (head-only RGB + Depth)
-# head RGB (resnet18) + head depth (lingbotdepth)
+# train_cfg_rgb_only_preextracted.yaml — Pre-extracted LingBotDepth features variant
+# Run `python extract_lingbot_features.py` first (one run extracts all 6 feature arrays).
 #
 # Usage:
-#   bash train_eval_loop.sh cfg=train_cfg_firstview.yaml
+#   python extract_lingbot_features.py \
+#     --zarr_path ./data/move_playingcard_away-demo_clean-50.zarr
+#   bash train_eval_loop.sh cfg=train_cfg_rgb_only_preextracted.yaml
 
 # ==================== Hydra Config ====================
 hydra:
-  config_name: firstview_rgbdepth_actdim_14
+  config_name: only_RGB_actdim14_preextracted
 
 # ==================== Task & Data ====================
 task:
@@ -16,23 +18,23 @@ task:
 
 # ==================== Pipeline ====================
 pipeline:
-  total_epochs: 500
-  eval_every: 50
+  total_epochs: 20000
+  eval_every: 1000
   eval_episodes: 8
   device: "0,1,2,3,4,5,6,7"
   seed: 42
   head_camera_type: D435
-  experiment_name: "20260502_firstview_rgbdepth"
+  experiment_name: "20260502_RGB_only_preextracted"
 
 # ==================== Training ====================
 training:
-  num_epochs: 500
-  lr_total_epochs: 500
+  num_epochs: 20000
+  lr_total_epochs: 20000
   dist_mode: True
   resume: True
   seed: 42
   lr_scheduler: cosine
-  lr_warmup_steps: 500
+  lr_warmup_steps: 50
   gradient_accumulate_every: 1
   use_ema: True
   freeze_encoder: True
@@ -44,7 +46,7 @@ training:
   max_val_steps: null
   tqdm_interval_sec: 1.0
   checkpoint_every: 10
-  log_every: 10
+  log_every: 200
   debug: False
 
 # ==================== Optimizer ====================
@@ -56,14 +58,14 @@ optimizer:
 
 # ==================== Dataloader ====================
 dataloader:
-  batch_size: 32
+  batch_size: 128
   num_workers: 0
   shuffle: True
   pin_memory: True
   persistent_workers: False
 
 val_dataloader:
-  batch_size: 64
+  batch_size: 16
   num_workers: 0
   shuffle: False
   pin_memory: True

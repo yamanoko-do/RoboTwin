@@ -203,11 +203,15 @@ class RobotWorkspace(BaseWorkspace):
                 if dist_mode:
                     train_dataloader.sampler.set_epoch(self.epoch)
 
-                # freeze encoder (unwrap DDP to access obs_encoder)
+                # freeze LingBotDepth backbone only (unwrap DDP to access obs_encoder)
+                # ResNet and LingBotDepth projection head remain trainable.
                 if cfg.training.freeze_encoder:
                     model_for_freeze = self.model.module if dist_mode else self.model
-                    model_for_freeze.obs_encoder.eval()
-                    model_for_freeze.obs_encoder.requires_grad_(False)
+                    for name, param in model_for_freeze.obs_encoder.named_parameters():
+                        # Freeze only the DINOv2 ViT backbone inside LingBotDepth;
+                        # keep ResNet, projection heads, and other modules trainable.
+                        if 'mdm_model' in name:
+                            param.requires_grad = False
 
                 train_losses = list()
                 total_epochs = cfg.training.get("lr_total_epochs", cfg.training.num_epochs)

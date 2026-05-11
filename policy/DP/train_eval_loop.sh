@@ -216,6 +216,7 @@ run_eval() {
             --epoch "${epoch_num}" \
             --rank "${gpu_idx}" \
             --world_size "${NUM_EVAL_GPUS}" \
+            --experiment_name "${EXPERIMENT_NAME}" \
         > "${gpu_eval_log}" 2>&1 &
         pids+=($!)
         gpu_idx=$(( gpu_idx + 1 ))
@@ -230,104 +231,14 @@ run_eval() {
         fi
     done
 
-    # Aggregate results from per-rank JSON files
-    python3 -c "
-import json, os, glob, sys
-
-epoch = ${epoch_num}
-output_dir = '${OUTPUT_DIR}'
-swanlab_id_file = '${SWANLAB_ID_FILE}'
-
-# Collect per-rank results
-total_success = 0
-total_episodes = 0
-best_video = None  # prefer success video
-
-rank_files = sorted(glob.glob(os.path.join(output_dir, f'eval_epoch{epoch}_rank*.json')))
-for rf in rank_files:
-    with open(rf) as f:
-        d = json.load(f)
-    total_success += d['success_count']
-    total_episodes += d['total_episodes']
-    # Pick first success video, or first video if none succeeded
-    vp = d.get('video_path')
-    if vp and os.path.exists(vp):
-        if best_video is None:
-            best_video = vp
-        elif d['success_count'] > 0 and best_video is not None:
-            # Replace with a success video if we only had a fail so far
-            try:
-                with open(glob.glob(os.path.join(output_dir, f'eval_epoch{epoch}_rank*.json'))[0]) as ff:
-                    prev = json.load(ff)
-                if prev.get('success_count', 0) == 0:
-                    best_video = vp
-            except:
-                pass
-    # Clean up rank file
-    os.remove(rf)
-
-success_rate = total_success / max(total_episodes, 1)
-print(f'\033[96m[Eval] Epoch {epoch}: {total_success}/{total_episodes} = {success_rate:.1%}\033[0m')
-
-# Save combined result
-result_path = os.path.join(output_dir, f'eval_epoch{epoch}.json')
-with open(result_path, 'w') as f:
-    json.dump({
-        'epoch': epoch,
-        'success_rate': success_rate,
-        'success_count': total_success,
-        'total_episodes': total_episodes,
-    }, f)
-
-# Log to SwanLab
-try:
-    import swanlab
-
-    # Load cfg for logging mode
-    import torch, dill
-    payload = torch.load(open('${ckpt_path}', 'rb'), pickle_module=dill, map_location='cpu')
-    cfg = payload['cfg']
-    from omegaconf import OmegaConf
-    OmegaConf.register_new_resolver('eval', eval, replace=True)
-
-    init_kwargs = dict(
-        workspace='limxooo',
-        dir=output_dir,
-        config=OmegaConf.to_container(cfg, resolve=True),
-        mode=cfg.logging.get('mode', 'disabled'),
-    )
-    for k, v in cfg.logging.items():
-        if k != 'mode':
-            init_kwargs[k] = v
-
-    # Resume existing run
-    if os.path.exists(swanlab_id_file):
-        with open(swanlab_id_file) as f:
-            sid = f.read().strip()
-        if sid:
-            init_kwargs['id'] = sid
-            init_kwargs['resume'] = 'must'
-
-    swanlab.init(**init_kwargs)
-    swanlab.log({
-        'eval/success_rate': success_rate,
-        'eval/success_count': total_success,
-        'eval/total_episodes': total_episodes,
-    }, step=epoch)
-
-    # Upload video
-    if best_video and os.path.exists(best_video):
-        gif_path = best_video.replace('.mp4', '.gif')
-        os.system(f'ffmpeg -y -loglevel error -i {best_video} -r 10 {gif_path}')
-        if os.path.exists(gif_path):
-            caption = f'epoch{epoch} ({\"success\" if total_success > 0 else \"fail\"})'
-            swanlab.log({'eval/video': swanlab.Video(gif_path, caption=caption)}, step=epoch)
-            os.remove(gif_path)
-
-    swanlab.finish()
-except Exception as e:
-    print(f'\033[91m[Eval] SwanLab logging failed: {e}\033[0m')
-"
+    # Aggregate results and log to SwanLab (delegated to Python so code changes take effect without restart)
+    python3 "${SCRIPT_DIR}/diffusion_policy/evaluation/aggregate_and_log.py" \
+        --output_dir "${OUTPUT_DIR}" \
+        --epoch "${epoch_num}" \
+        --ckpt_path "${ckpt_path}" \
+        --swanlab_id_file "${SWANLAB_ID_FILE}" \
+        --eval_videos_dir "${SCRIPT_DIR}/data/eval_videos" \
+        --experiment_name "${EXPERIMENT_NAME}"
 
     # Print result
     local result_json="${OUTPUT_DIR}/eval_epoch${epoch_num}.json"

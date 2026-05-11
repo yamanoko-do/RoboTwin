@@ -1,4 +1,4 @@
-from typing import Dict
+from typing import Dict, Optional
 import numba
 import torch
 import numpy as np
@@ -29,14 +29,33 @@ class RobotImageDataset(BaseImageDataset):
         batch_size=128,
         max_train_episodes=None,
         depth_scale: float = 1.0,
+        # Pre-extracted LingBotDepth feature keys: maps rgbd rgb_key -> zarr feat key
+        # e.g. {"head_cam": "head_cam_lingbot_feat"}
+        preextracted_rgbd_feat_keys: Optional[Dict[str, str]] = None,
+        # Pre-extracted LingBotDepth spatial feature keys: maps rgbd rgb_key -> zarr spatial key
+        # e.g. {"head_cam": "head_cam_lingbot_spatial_rgbd"}
+        preextracted_rgbd_spatial_keys: Optional[Dict[str, str]] = None,
     ):
 
         super().__init__()
+        self.preextracted_rgbd_feat_keys = preextracted_rgbd_feat_keys or {}
+        self.preextracted_rgbd_spatial_keys = preextracted_rgbd_spatial_keys or {}
+
+        # Build the list of zarr keys to load
+        zarr_keys = ["head_camera", "left_camera", "right_camera",
+                     "head_camera_depth", "left_camera_depth", "right_camera_depth",
+                     "state", "action"]
+        # Add pre-extracted feature keys
+        for feat_key in self.preextracted_rgbd_feat_keys.values():
+            if feat_key not in zarr_keys:
+                zarr_keys.append(feat_key)
+        for spatial_key in self.preextracted_rgbd_spatial_keys.values():
+            if spatial_key not in zarr_keys:
+                zarr_keys.append(spatial_key)
+
         self.replay_buffer = ReplayBuffer.copy_from_path(
             zarr_path,
-            keys=["head_camera", "left_camera", "right_camera",
-                  "head_camera_depth", "left_camera_depth", "right_camera_depth",
-                  "state", "action"],
+            keys=zarr_keys,
         )
 
         val_mask = get_val_mask(n_episodes=self.replay_buffer.n_episodes, val_ratio=val_ratio, seed=seed)
@@ -110,6 +129,11 @@ class RobotImageDataset(BaseImageDataset):
             normalizer["head_depth"] = get_image_range_normalizer()
             normalizer["left_depth"] = get_image_range_normalizer()
             normalizer["right_depth"] = get_image_range_normalizer()
+        # Pre-extracted features use identity normalizer (pass through)
+        for feat_key in self.preextracted_rgbd_feat_keys.values():
+            normalizer[feat_key] = get_depth_identity_normalizer()
+        for spatial_key in self.preextracted_rgbd_spatial_keys.values():
+            normalizer[spatial_key] = get_depth_identity_normalizer()
         return normalizer
 
     def __len__(self) -> int:
@@ -124,16 +148,22 @@ class RobotImageDataset(BaseImageDataset):
         left_depth = sample["left_camera_depth"].astype(np.float32) / self.depth_scale
         right_depth = sample["right_camera_depth"].astype(np.float32) / self.depth_scale
 
+        obs = {
+            "head_cam": head_cam,
+            "left_cam": left_cam,
+            "right_cam": right_cam,
+            "head_depth": head_depth,
+            "left_depth": left_depth,
+            "right_depth": right_depth,
+            "agent_pos": agent_pos,
+        }
+        for feat_key in self.preextracted_rgbd_feat_keys.values():
+            obs[feat_key] = sample[feat_key].astype(np.float32)
+        for spatial_key in self.preextracted_rgbd_spatial_keys.values():
+            obs[spatial_key] = sample[spatial_key].astype(np.float32)
+
         data = {
-            "obs": {
-                "head_cam": head_cam,
-                "left_cam": left_cam,
-                "right_cam": right_cam,
-                "head_depth": head_depth,
-                "left_depth": left_depth,
-                "right_depth": right_depth,
-                "agent_pos": agent_pos,
-            },
+            "obs": obs,
             "action": sample["action"].astype(np.float32),
         }
         return data
@@ -168,16 +198,24 @@ class RobotImageDataset(BaseImageDataset):
         left_depth = samples["left_camera_depth"].to(device, non_blocking=True) / self.depth_scale
         right_depth = samples["right_camera_depth"].to(device, non_blocking=True) / self.depth_scale
         action = samples["action"].to(device, non_blocking=True)
+
+        obs = {
+            "head_cam": head_cam,
+            "left_cam": left_cam,
+            "right_cam": right_cam,
+            "head_depth": head_depth,
+            "left_depth": left_depth,
+            "right_depth": right_depth,
+            "agent_pos": agent_pos,
+        }
+        # Add pre-extracted LingBotDepth features
+        for feat_key in self.preextracted_rgbd_feat_keys.values():
+            obs[feat_key] = samples[feat_key].to(device, non_blocking=True)
+        for spatial_key in self.preextracted_rgbd_spatial_keys.values():
+            obs[spatial_key] = samples[spatial_key].to(device, non_blocking=True)
+
         return {
-            "obs": {
-                "head_cam": head_cam,
-                "left_cam": left_cam,
-                "right_cam": right_cam,
-                "head_depth": head_depth,
-                "left_depth": left_depth,
-                "right_depth": right_depth,
-                "agent_pos": agent_pos,
-            },
+            "obs": obs,
             "action": action,
         }
 

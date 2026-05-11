@@ -1,12 +1,14 @@
-# train_cfg_firstview.yaml — Config C: Human-like (head-only RGB + Depth)
-# head RGB (resnet18) + head depth (lingbotdepth)
+# train_cfg_rgb_only_spatial.yaml — RGB-only spatial features variant (CLS + spatial + UV)
+# Run `python extract_lingbot_features.py` first to extract both CLS and spatial features.
 #
 # Usage:
-#   bash train_eval_loop.sh cfg=train_cfg_firstview.yaml
+#   python extract_lingbot_features.py \
+#     --zarr_path ./data/move_playingcard_away-demo_clean-50.zarr
+#   bash train_eval_loop.sh cfg=train_cfg_rgb_only_spatial.yaml
 
 # ==================== Hydra Config ====================
 hydra:
-  config_name: firstview_rgbdepth_actdim_14
+  config_name: only_RGB_actdim14_spatial
 
 # ==================== Task & Data ====================
 task:
@@ -16,23 +18,23 @@ task:
 
 # ==================== Pipeline ====================
 pipeline:
-  total_epochs: 500
-  eval_every: 50
+  total_epochs: 10000
+  eval_every: 1000
   eval_episodes: 8
   device: "0,1,2,3,4,5,6,7"
   seed: 42
   head_camera_type: D435
-  experiment_name: "20260502_firstview_rgbdepth"
+  experiment_name: "20260509_RGB_only_spatial"
 
 # ==================== Training ====================
 training:
-  num_epochs: 500
-  lr_total_epochs: 500
+  num_epochs: 10000
+  lr_total_epochs: 10000
   dist_mode: True
   resume: True
   seed: 42
   lr_scheduler: cosine
-  lr_warmup_steps: 500
+  lr_warmup_steps: 50
   gradient_accumulate_every: 1
   use_ema: True
   freeze_encoder: True
@@ -43,8 +45,8 @@ training:
   max_train_steps: null
   max_val_steps: null
   tqdm_interval_sec: 1.0
-  checkpoint_every: 10
-  log_every: 10
+  checkpoint_every: 500
+  log_every: 5000
   debug: False
 
 # ==================== Optimizer ====================
@@ -54,9 +56,10 @@ optimizer:
   eps: 1.0e-8
   weight_decay: 1.0e-6
 
+
 # ==================== Dataloader ====================
 dataloader:
-  batch_size: 32
+  batch_size: 512
   num_workers: 0
   shuffle: True
   pin_memory: True

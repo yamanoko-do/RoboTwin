@@ -180,6 +180,7 @@ def main(usr_args):
     # Support --test_num override (default 100)
     test_num = usr_args.get("test_num", 100)
     topk = 1
+    suc_nums = []
 
     model = get_model(usr_args)
     st_seed, suc_num = eval_policy(task_name,

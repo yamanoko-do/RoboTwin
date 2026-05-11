@@ -67,6 +67,17 @@ class MultiImageObsEncoder(ModuleAttrMixin):
         rgbd_crop_shape: Union[Tuple[int, int], Dict[str, tuple], None] = None,
         # depth scale (divide by this to get meters)
         depth_scale: float = 1000.0,
+        # pre-extracted LingBotDepth CLS tokens: maps rgbd rgb_key -> cls key in obs_dict
+        # e.g. {"head_cam": "head_cam_lingbot_cls_rgbd"}
+        # When set, forward() reads CLS tokens from obs_dict and runs them through
+        # the rgbd_model's projection head (keeping projection trainable).
+        preextracted_rgbd_feat_keys: Optional[Dict[str, str]] = None,
+        # pre-extracted LingBotDepth spatial features: maps rgbd rgb_key -> spatial key in obs_dict
+        # e.g. {"head_cam": "head_cam_lingbot_spatial_rgbd"}
+        # When both cls_key and spatial_key are present, the rgbd_model's spatial
+        # path is used (features + CLS + UV → SpatialAggregationHead).
+        # When only cls_key is present, falls back to CLS-only projection.
+        preextracted_rgbd_spatial_keys: Optional[Dict[str, str]] = None,
     ):
         """
         Assumes rgb input: B,C,H,W
@@ -333,6 +344,9 @@ class MultiImageObsEncoder(ModuleAttrMixin):
         self.low_dim_keys = low_dim_keys
         self.rgbd_keys = rgbd_keys
         self.rgbd_key_pairs = rgbd_key_pairs or {}
+        self.preextracted_rgbd_feat_keys = preextracted_rgbd_feat_keys or {}
+        self.preextracted_rgbd_spatial_keys = preextracted_rgbd_spatial_keys or {}
+        self.rgbd_feature_dim = rgbd_model.feature_dim if rgbd_model is not None else 512
         self.key_shape_map = key_shape_map
 
     def forward(self, obs_dict):
@@ -418,70 +432,102 @@ class MultiImageObsEncoder(ModuleAttrMixin):
 
         # process rgbd input (joint RGB+Depth encoding via LingBotDepth)
         if len(self.rgbd_keys) > 0:
-            if self.share_rgbd_model:
-                # batch all rgbd views through shared model
-                rgbd_imgs = list()
-                rgbd_depths = list()
-                has_depth = False
-                for key in self.rgbd_keys:
-                    rgb = obs_dict[key]
-                    if batch_size is None:
-                        batch_size = rgb.shape[0]
-                    else:
-                        assert batch_size == rgb.shape[0]
-                    rgb = self.key_rgbd_transform_map[key](rgb)
-                    rgbd_imgs.append(rgb)
+            # Separate keys with pre-extracted CLS tokens from those needing encoder
+            # Fall back to online encoding when cls_key is absent (e.g. during eval)
+            preextracted_keys = [k for k in self.rgbd_keys
+                                 if k in self.preextracted_rgbd_feat_keys
+                                 and self.preextracted_rgbd_feat_keys[k] in obs_dict]
+            encoder_keys = [k for k in self.rgbd_keys if k not in preextracted_keys]
 
-                    depth_key = self.rgbd_key_pairs.get(key)
-                    if depth_key is not None and depth_key in obs_dict:
-                        depth = obs_dict[depth_key]
-                        depth = self.key_depth_rgbd_transform_map[depth_key](depth)
-                        rgbd_depths.append(depth)
-                        has_depth = True
-                    else:
-                        rgbd_depths.append(None)
-
-                # Concat RGB: (N*B, 3, H, W)
-                rgbd_imgs_cat = torch.cat(rgbd_imgs, dim=0)
-                # Concat depth: (N*B, 1, H, W) or None
-                if has_depth:
-                    # For views without depth, use zeros
-                    first_shape = rgbd_imgs_cat.shape
-                    rgbd_depths_cat = torch.cat([
-                        d if d is not None
-                        else torch.zeros(first_shape[0] // len(rgbd_imgs), 1, first_shape[2], first_shape[3],
-                                         device=first_shape.device if hasattr(first_shape, 'device') else rgbd_imgs_cat.device,
-                                         dtype=rgbd_imgs_cat.dtype)
-                        for d in rgbd_depths
-                    ], dim=0)
+            # --- Pre-extracted features: run through rgbd_model ---
+            # This keeps the projection head / spatial head trainable while the backbone stays frozen.
+            for key in preextracted_keys:
+                cls_key = self.preextracted_rgbd_feat_keys[key]
+                cls_token = obs_dict[cls_key]
+                if batch_size is None:
+                    batch_size = cls_token.shape[0]
                 else:
-                    rgbd_depths_cat = None
+                    assert batch_size == cls_token.shape[0]
+                # Determine which rgbd_model to use
+                rgbd_model_key = "rgbd" if self.share_rgbd_model else key
+                rgbd_model = self.key_rgbd_model_map[rgbd_model_key]
+                # Check if spatial features are also available
+                spatial_key = self.preextracted_rgbd_spatial_keys.get(key)
+                if spatial_key is not None and spatial_key in obs_dict:
+                    # Spatial path: features + CLS + UV → SpatialAggregationHead
+                    spatial_features = obs_dict[spatial_key]
+                    feat = rgbd_model(cls_token=cls_token, preextracted_features=spatial_features)
+                else:
+                    # CLS-only path: projection head
+                    feat = rgbd_model(cls_token=cls_token)
+                features.append(feat)
 
-                # Forward through shared rgbd model
-                feature = self.key_rgbd_model_map["rgbd"](rgbd_imgs_cat, depth=rgbd_depths_cat)
-                # (N*B, D) -> (N, B, D) -> (B, N, D) -> (B, N*D)
-                feature = feature.reshape(-1, batch_size, *feature.shape[1:])
-                feature = torch.moveaxis(feature, 0, 1)
-                feature = feature.reshape(batch_size, -1)
-                features.append(feature)
-            else:
-                # per-key rgbd processing
-                for key in self.rgbd_keys:
-                    rgb = obs_dict[key]
-                    if batch_size is None:
-                        batch_size = rgb.shape[0]
+            # --- Encoder features: run LingBotDepthEncoder ---
+            if len(encoder_keys) > 0:
+                if self.share_rgbd_model:
+                    # batch all rgbd views through shared model
+                    rgbd_imgs = list()
+                    rgbd_depths = list()
+                    has_depth = False
+                    for key in encoder_keys:
+                        rgb = obs_dict[key]
+                        if batch_size is None:
+                            batch_size = rgb.shape[0]
+                        else:
+                            assert batch_size == rgb.shape[0]
+                        rgb = self.key_rgbd_transform_map[key](rgb)
+                        rgbd_imgs.append(rgb)
+
+                        depth_key = self.rgbd_key_pairs.get(key)
+                        if depth_key is not None and depth_key in obs_dict:
+                            depth = obs_dict[depth_key]
+                            depth = self.key_depth_rgbd_transform_map[depth_key](depth)
+                            rgbd_depths.append(depth)
+                            has_depth = True
+                        else:
+                            rgbd_depths.append(None)
+
+                    # Concat RGB: (N*B, 3, H, W)
+                    rgbd_imgs_cat = torch.cat(rgbd_imgs, dim=0)
+                    # Concat depth: (N*B, 1, H, W) or None
+                    if has_depth:
+                        # For views without depth, use zeros
+                        first_shape = rgbd_imgs_cat.shape
+                        rgbd_depths_cat = torch.cat([
+                            d if d is not None
+                            else torch.zeros(first_shape[0] // len(rgbd_imgs), 1, first_shape[2], first_shape[3],
+                                             device=first_shape.device if hasattr(first_shape, 'device') else rgbd_imgs_cat.device,
+                                             dtype=rgbd_imgs_cat.dtype)
+                            for d in rgbd_depths
+                        ], dim=0)
                     else:
-                        assert batch_size == rgb.shape[0]
-                    rgb = self.key_rgbd_transform_map[key](rgb)
+                        rgbd_depths_cat = None
 
-                    depth_key = self.rgbd_key_pairs.get(key)
-                    depth = None
-                    if depth_key is not None and depth_key in obs_dict:
-                        depth = obs_dict[depth_key]
-                        depth = self.key_depth_rgbd_transform_map[depth_key](depth)
-
-                    feature = self.key_rgbd_model_map[key](rgb, depth=depth)
+                    # Forward through shared rgbd model
+                    feature = self.key_rgbd_model_map["rgbd"](rgbd_imgs_cat, depth=rgbd_depths_cat)
+                    # (N*B, D) -> (N, B, D) -> (B, N, D) -> (B, N*D)
+                    feature = feature.reshape(-1, batch_size, *feature.shape[1:])
+                    feature = torch.moveaxis(feature, 0, 1)
+                    feature = feature.reshape(batch_size, -1)
                     features.append(feature)
+                else:
+                    # per-key rgbd processing
+                    for key in encoder_keys:
+                        rgb = obs_dict[key]
+                        if batch_size is None:
+                            batch_size = rgb.shape[0]
+                        else:
+                            assert batch_size == rgb.shape[0]
+                        rgb = self.key_rgbd_transform_map[key](rgb)
+
+                        depth_key = self.rgbd_key_pairs.get(key)
+                        depth = None
+                        if depth_key is not None and depth_key in obs_dict:
+                            depth = obs_dict[depth_key]
+                            depth = self.key_depth_rgbd_transform_map[depth_key](depth)
+
+                        feature = self.key_rgbd_model_map[key](rgb, depth=depth)
+                        features.append(feature)
 
         # process lowdim input
         for key in self.low_dim_keys:
@@ -508,6 +554,29 @@ class MultiImageObsEncoder(ModuleAttrMixin):
             shape = tuple(1 if s == -1 else s for s in shape)
             this_obs = torch.zeros((batch_size, ) + shape, dtype=self.dtype, device=self.device)
             example_obs_dict[key] = this_obs
+        # Add placeholders for pre-extracted CLS token keys
+        # CLS tokens have dim = backbone's dim_features, which is projected later
+        rgbd_model = None
+        if self.share_rgbd_model and "rgbd" in self.key_rgbd_model_map:
+            rgbd_model = self.key_rgbd_model_map["rgbd"]
+        elif self.rgbd_keys:
+            first_key = list(self.rgbd_keys)[0]
+            if first_key in self.key_rgbd_model_map:
+                rgbd_model = self.key_rgbd_model_map[first_key]
+        cls_dim = rgbd_model.mdm_model.encoder.dim_features if rgbd_model is not None else 1024
+        for cls_key in self.preextracted_rgbd_feat_keys.values():
+            example_obs_dict[cls_key] = torch.zeros(
+                batch_size, cls_dim,
+                dtype=self.dtype, device=self.device,
+            )
+        # Add placeholders for pre-extracted spatial feature keys
+        pool_h = getattr(rgbd_model, 'pool_h', 6) if rgbd_model is not None else 6
+        pool_w = getattr(rgbd_model, 'pool_w', 8) if rgbd_model is not None else 8
+        for spatial_key in self.preextracted_rgbd_spatial_keys.values():
+            example_obs_dict[spatial_key] = torch.zeros(
+                batch_size, cls_dim, pool_h, pool_w,
+                dtype=self.dtype, device=self.device,
+            )
         example_output = self.forward(example_obs_dict)
         output_shape = example_output.shape[1:]
         return output_shape
